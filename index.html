@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cyclic Cellular Automata Shader</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <canvas id="canvas" width="720" height="480"></canvas>
+        <div class="controls">
+            <div class="control-group">
+                <label for="range">Range:</label>
+                <input type="range" id="range" min="1" max="10" value="1" step="1">
+                <span id="range-value" class="value-display">1</span>
+            </div>
+            <div class="control-group">
+                <label for="threshold">Threshold:</label>
+                <input type="range" id="threshold" min="1" max="8" value="1" step="1">
+                <span id="threshold-value" class="value-display">3</span>
+            </div>
+            <div class="control-group">
+                <label for="states">States:</label>
+                <input type="range" id="states" min="1" max="30" value="24" step="1">
+                <span id="states-value" class="value-display">16</span>
+            </div>
+            <div class="control-group">
+                <label for="fps">FPS:</label>
+                <input type="range" id="fps" min="1" max="60" value="30" step="1">
+                <span id="fps-value" class="value-display">30</span>
+            </div>
+            <div class="control-group">
+                <label for="colorMode">Color Mode:</label>
+                <select id="colorMode" class="color-mode-select">
+                    <option value="grayscale">Grayscale</option>
+                    <option value="rainbow">Rainbow</option>
+                </select>
+            </div>
+            <div class="neighborhood-toggle">
+                <span>Neumann</span>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="neighborhood" checked>
+                    <span class="slider"></span>
+                </label>
+                <span>Moore</span>
+            </div>
+            <div class="buttons">
+                <button id="reset">Reset</button>
+                <button id="pause">Pause</button>
+            </div>
+        </div>
+    </div>
+
+    <script id="vertex-shader" type="x-shader/x-vertex">
+        attribute vec2 a_position;
+        varying vec2 v_texCoord;
+        
+        void main() {
+            gl_Position = vec4(a_position, 0, 1);
+            v_texCoord = a_position * 0.5 + 0.5;
+        }
+    </script>
+    
+    <script id="fragment-shader" type="x-shader/x-fragment">
+        precision highp float;
+        
+        uniform sampler2D u_texture;
+        uniform vec2 u_resolution;
+        uniform float u_range;
+        uniform float u_threshold;
+        uniform float u_states;
+        uniform bool u_isMoore;
+        
+        varying vec2 v_texCoord;
+        
+        void main() {
+            vec2 texel = 1.0 / u_resolution;
+            vec4 center = texture2D(u_texture, v_texCoord);
+            float centerState = floor(center.r * (u_states - 0.1));
+            float nextState = mod(centerState + 1.0, u_states);
+            
+            float count = 0.0;
+            int range = int(u_range);
+            // Optimize: Only loop over the actual range
+            for (int y = -5; y <= 5; y++) {
+                for (int x = -5; x <= 5; x++) {
+                    if (x == 0 && y == 0) continue;
+                    if (abs(float(x)) > u_range || abs(float(y)) > u_range) continue;
+                    if (!u_isMoore && abs(float(x)) + abs(float(y)) > u_range) continue;
+                    vec2 offset = vec2(float(x), float(y)) * texel;
+                    vec4 neighbor = texture2D(u_texture, v_texCoord + offset);
+                    float neighborState = floor(neighbor.r * (u_states - 0.1));
+                    if (abs(neighborState - nextState) < 0.5) {
+                        count += 1.0;
+                    }
+                }
+            }
+            if (count >= u_threshold) {
+                gl_FragColor = vec4(nextState / (u_states - 1.0), 0.0, 0.0, 1.0);
+            } else {
+                gl_FragColor = vec4(centerState / (u_states - 1.0), 0.0, 0.0, 1.0);
+            }
+        }
+    </script>
+    
+    <script id="render-shader" type="x-shader/x-fragment">
+        precision highp float;
+        
+        uniform sampler2D u_texture;
+        uniform float u_states;
+        uniform bool u_isRainbow;
+        
+        varying vec2 v_texCoord;
+        
+        vec3 hsl2rgb(vec3 c) {
+            vec3 rgb = clamp(abs(mod(c.x * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);
+            return c.z + c.y * (rgb - 0.5) * (1.0 - abs(2.0 * c.z - 1.0));
+        }
+        
+        void main() {
+            vec4 texel = texture2D(u_texture, v_texCoord);
+            float state = floor(texel.r * (u_states - 0.1));
+            float normalizedState = state / (u_states - 1.0);
+            vec3 color = u_isRainbow ? hsl2rgb(vec3(normalizedState, 1.0, 0.5)) : vec3(normalizedState);
+            gl_FragColor = vec4(color, 1.0);
+        }
+    </script>
+    
+    <script>
+        let gl, programInfo, buffers;
+        let textures = [];
+        let framebuffers = [];
+        let currentTexture = 0;
+        let frameCount = 0;
+        let isRunning = true;
+        let isRainbow = false;
+        let lastFrameTime = 0;
+        let animationId = null;
+        
+        // Parameters
+        let range = 1;
+        let threshold = 1;
+        let states = 24;
+        let isMoore = true;
+        let fps = 30;
+        let frameInterval = 1000 / fps; // Milliseconds between frames
+        
+        // Initialize controls
+        document.getElementById('range').addEventListener('input', function() {
+            range = parseInt(this.value);
+            document.getElementById('range-value').textContent = range;
+        });
+        
+        document.getElementById('threshold').addEventListener('input', function() {
+            threshold = parseInt(this.value);
+            document.getElementById('threshold-value').textContent = threshold;
+        });
+        
+        document.getElementById('states').addEventListener('input', function() {
+            states = parseInt(this.value);
+            document.getElementById('states-value').textContent = states;
+            initializeTexture();
+        });
+        
+        document.getElementById('fps').addEventListener('input', function() {
+            fps = parseInt(this.value);
+            frameInterval = 1000 / fps;
+            document.getElementById('fps-value').textContent = fps;
+        });
+        
+        document.getElementById('neighborhood').addEventListener('change', function() {
+            isMoore = this.checked;
+        });
+        
+        document.getElementById('reset').addEventListener('click', function() {
+            initializeTexture();
+        });
+        
+        document.getElementById('pause').addEventListener('click', function() {
+            isRunning = !isRunning;
+            this.textContent = isRunning ? 'Pause' : 'Resume';
+            
+            if (isRunning && !animationId) {
+                lastFrameTime = performance.now();
+                render(lastFrameTime);
+            }
+        });
+
+        document.getElementById('colorMode').addEventListener('change', function() {
+            isRainbow = this.value === 'rainbow';
+        });
+        
+        // Initialize UI values
+        document.getElementById('range-value').textContent = range;
+        document.getElementById('threshold-value').textContent = threshold;
+        document.getElementById('states-value').textContent = states;
+        document.getElementById('fps-value').textContent = fps;
+        
+        // Initialize WebGL
+        function initWebGL() {
+            const canvas = document.getElementById('canvas');
+            gl = canvas.getContext('webgl', { preserveDrawingBuffer: true });
+            
+            if (!gl) {
+                alert('WebGL not supported');
+                return;
+            }
+            
+            // Create shader programs
+            const vertexShaderSource = document.getElementById('vertex-shader').textContent;
+            const fragmentShaderSource = document.getElementById('fragment-shader').textContent;
+            const renderShaderSource = document.getElementById('render-shader').textContent;
+            
+            const vertexShader = createShader(gl, gl.VERTEX_SHADER, vertexShaderSource);
+            const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fragmentShaderSource);
+            const renderShader = createShader(gl, gl.FRAGMENT_SHADER, renderShaderSource);
+            
+            const updateProgram = createProgram(gl, vertexShader, fragmentShader);
+            const renderProgram = createProgram(gl, vertexShader, renderShader);
+            
+            // Store shader program info
+            programInfo = {
+                update: {
+                    program: updateProgram,
+                    attribLocations: {
+                        position: gl.getAttribLocation(updateProgram, 'a_position'),
+                    },
+                    uniformLocations: {
+                        texture: gl.getUniformLocation(updateProgram, 'u_texture'),
+                        resolution: gl.getUniformLocation(updateProgram, 'u_resolution'),
+                        range: gl.getUniformLocation(updateProgram, 'u_range'),
+                        threshold: gl.getUniformLocation(updateProgram, 'u_threshold'),
+                        states: gl.getUniformLocation(updateProgram, 'u_states'),
+                        isMoore: gl.getUniformLocation(updateProgram, 'u_isMoore'),
+                    },
+                },
+                render: {
+                    program: renderProgram,
+                    attribLocations: {
+                        position: gl.getAttribLocation(renderProgram, 'a_position'),
+                    },
+                    uniformLocations: {
+                        texture: gl.getUniformLocation(renderProgram, 'u_texture'),
+                        states: gl.getUniformLocation(renderProgram, 'u_states'),
+                        isRainbow: gl.getUniformLocation(renderProgram, 'u_isRainbow'),
+                    },
+                },
+            };
+            
+            // Create buffers
+            buffers = initBuffers();
+            
+            // Create textures and framebuffers
+            for (let i = 0; i < 2; i++) {
+                textures[i] = createTexture();
+                framebuffers[i] = createFramebuffer(textures[i]);
+            }
+            
+            // Initialize texture data
+            initializeTexture();
+            
+            // Set up animation loop
+            lastFrameTime = performance.now();
+            render(lastFrameTime);
+        }
+        
+        function createShader(gl, type, source) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                console.error('Shader compilation error:', gl.getShaderInfoLog(shader));
+                gl.deleteShader(shader);
+                return null;
+            }
+            return shader;
+        }
+        
+        function createProgram(gl, vertexShader, fragmentShader) {
+            const program = gl.createProgram();
+            gl.attachShader(program, vertexShader);
+            gl.attachShader(program, fragmentShader);
+            gl.linkProgram(program);
+            if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+                console.error('Program linking error:', gl.getProgramInfoLog(program));
+                return null;
+            }
+            return program;
+        }
+        
+        function initBuffers() {
+            // Create a buffer for the square (2 triangles)
+            const positionBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+            
+            const positions = [
+                -1.0, -1.0,
+                 1.0, -1.0,
+                -1.0,  1.0,
+                 1.0,  1.0,
+            ];
+            
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
+            
+            return {
+                position: positionBuffer,
+            };
+        }
+        
+        function createTexture() {
+            const texture = gl.createTexture();
+            gl.bindTexture(gl.TEXTURE_2D, texture);
+            
+            // Set texture parameters
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+            
+            // Create empty texture
+            const canvas = document.getElementById('canvas');
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, canvas.width, canvas.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+            
+            return texture;
+        }
+        
+        function createFramebuffer(texture) {
+            const framebuffer = gl.createFramebuffer();
+            gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+            return framebuffer;
+        }
+        
+        function initializeTexture() {
+            const canvas = document.getElementById('canvas');
+            const width = canvas.width;
+            const height = canvas.height;
+            const pixels = new Uint8Array(width * height * 4);
+            
+            // Initialize with random states
+            for (let i = 0; i < width * height; i++) {
+                const state = Math.floor(Math.random() * states);
+                const normalizedState = state / (states - 1);
+                
+                pixels[i * 4] = Math.floor(normalizedState * 255);  // R
+                pixels[i * 4 + 1] = 0;                              // G
+                pixels[i * 4 + 2] = 0;                              // B
+                pixels[i * 4 + 3] = 255;                            // A
+            }
+            
+            gl.bindTexture(gl.TEXTURE_2D, textures[currentTexture]);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+        }
+        
+        function updateSimulation() {
+            const canvas = document.getElementById('canvas');
+            
+            // Update simulation
+            const nextTexture = (currentTexture + 1) % 2;
+            
+            // Bind framebuffer for rendering to texture
+            gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffers[nextTexture]);
+            gl.viewport(0, 0, canvas.width, canvas.height);
+            
+            // Clear the framebuffer
+            gl.clearColor(0.0, 0.0, 0.0, 1.0);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+            
+            // Use update program
+            gl.useProgram(programInfo.update.program);
+            
+            // Bind position buffer
+            gl.bindBuffer(gl.ARRAY_BUFFER, buffers.position);
+            gl.vertexAttribPointer(
+                programInfo.update.attribLocations.position,
+                2,       // size
+                gl.FLOAT, // type
+                false,   // normalize
+                0,       // stride
+                0        // offset
+            );
+            gl.enableVertexAttribArray(programInfo.update.attribLocations.position);
+            
+            // Set uniforms
+            gl.uniform1i(programInfo.update.uniformLocations.texture, 0);
+            gl.uniform2f(programInfo.update.uniformLocations.resolution, canvas.width, canvas.height);
+            gl.uniform1f(programInfo.update.uniformLocations.range, range);
+            gl.uniform1f(programInfo.update.uniformLocations.threshold, threshold);
+            gl.uniform1f(programInfo.update.uniformLocations.states, states);
+            gl.uniform1i(programInfo.update.uniformLocations.isMoore, isMoore ? 1 : 0);
+            
+            // Bind texture
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, textures[currentTexture]);
+            
+            // Draw
+            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+            
+            // Switch textures
+            currentTexture = nextTexture;
+        }
+        
+        function renderToCanvas() {
+            const canvas = document.getElementById('canvas');
+            
+            // Render to canvas
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            gl.viewport(0, 0, canvas.width, canvas.height);
+            
+            // Use render program
+            gl.useProgram(programInfo.render.program);
+            
+            // Bind position buffer
+            gl.bindBuffer(gl.ARRAY_BUFFER, buffers.position);
+            gl.vertexAttribPointer(
+                programInfo.render.attribLocations.position,
+                2,       // size
+                gl.FLOAT, // type
+                false,   // normalize
+                0,       // stride
+                0        // offset
+            );
+            gl.enableVertexAttribArray(programInfo.render.attribLocations.position);
+            
+            // Set uniforms
+            gl.uniform1i(programInfo.render.uniformLocations.texture, 0);
+            gl.uniform1f(programInfo.render.uniformLocations.states, states);
+            gl.uniform1i(programInfo.render.uniformLocations.isRainbow, isRainbow ? 1 : 0);
+            
+            // Bind texture
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, textures[currentTexture]);
+            
+            // Draw
+            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        }
+        
+        function render(currentTime) {
+            // Calculate time since last frame
+            const deltaTime = currentTime - lastFrameTime;
+            
+            // Only update simulation based on FPS setting
+            if (isRunning && deltaTime >= frameInterval) {
+                updateSimulation();
+                lastFrameTime = currentTime - (deltaTime % frameInterval); // Account for leftover time
+            }
+            
+            // Always render the current state to canvas
+            renderToCanvas();
+            
+            // Request next frame
+            animationId = requestAnimationFrame(render);
+        }
+        
+        // Initialize WebGL when the page loads
+        window.onload = initWebGL;
+    </script>
+</body>
+</html>
